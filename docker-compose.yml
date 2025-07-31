@@ -1,0 +1,70 @@
+version: '3.8'
+
+services:
+  web:
+    build:
+      context: ./app
+    container_name: maawaz-RAG_app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - vector_data:/app/RAGembeddings
+      - shared_uploads:/app/uploads  # shared but ephemeral uploads dir
+      - chroma_cache:/root/.cache/chroma/
+    ports:
+      - "8341:8000"
+    depends_on:
+      - db
+      - redis
+    environment:
+      - DATABASE_URL=postgresql://postgres:admin123@db/RAG
+      - REDIS_URL=redis://redis:6379/0
+      - VECTOR_DB_PATH=/app/RAGembeddings
+    env_file:
+      - ./app/api.env
+
+  celery_worker:
+    build:
+      context: ./app
+    container_name: maawaz-celery_workers
+    command: celery -A workers worker --loglevel=info --pool=solo
+    volumes:
+      - vector_data:/app/RAGembeddings
+      - shared_uploads:/app/uploads  # same shared uploads dir
+      - chroma_cache:/root/.cache/chroma/
+    depends_on:
+      - db
+      - redis
+    environment:
+      - DATABASE_URL=postgresql://postgres:admin123@db/RAG
+      - REDIS_URL=redis://redis:6379/0
+      - VECTOR_DB_PATH=/app/RAGembeddings
+    env_file:
+      - ./app/api.env
+
+  db:
+    image: postgres:latest
+    container_name: maawaz-db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: admin123
+      POSTGRES_DB: RAG
+    ports:
+      - "8342:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:latest
+    container_name: maawaz-redis_cache
+    ports:
+      - "8343:6379"
+    volumes:
+    - chroma_cache:/root/.cache/chroma/
+  
+
+volumes:
+  postgres_data:
+  vector_data:
+  shared_uploads: 
+  chroma_cache:

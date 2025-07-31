@@ -1,0 +1,31 @@
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+import chromadb
+from sqlalchemy.orm import sessionmaker,Session
+from typing import Annotated
+from fastapi import Depends
+from redisconfig import settings
+
+#POSTGRE DB CONNECTION
+DATABASE_URL = 'postgresql://postgres:admin123@db/RAG'
+engine = create_engine(DATABASE_URL)
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+Base = declarative_base()
+
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+db_dependency=Annotated[Session, Depends(get_db)] 
+
+#CHROMA DB CONNECTION
+
+vector_client=chromadb.PersistentClient(path=settings.VECTOR_DB_PATH)
+vector_db=vector_client.get_or_create_collection('vectorDB')

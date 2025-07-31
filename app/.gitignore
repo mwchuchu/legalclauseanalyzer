@@ -1,0 +1,19 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+env/
+
+# OS files
+.DS_Store
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Embeddings
+RAGembeddings/
+app/RAGembeddings/
+**RAGembeddings**
