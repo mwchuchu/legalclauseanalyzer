@@ -17,3 +17,4 @@ env/
 RAGembeddings/
 /RAGembeddings/
 ../RAGembeddings**
+app/api.env
