@@ -7,7 +7,7 @@ from fastapi import Depends
 from redisconfig import settings
 
 #POSTGRE DB CONNECTION
-DATABASE_URL = 'postgresql://postgres:admin123@db/RAG'
+DATABASE_URL = 'postgresql://postgres:admin123@localhost/RAG'
 engine = create_engine(DATABASE_URL)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -24,8 +24,3 @@ def get_db():
         db.close()
 
 db_dependency=Annotated[Session, Depends(get_db)] 
-
-#CHROMA DB CONNECTION
-
-vector_client=chromadb.PersistentClient(path=settings.VECTOR_DB_PATH)
-vector_db=vector_client.get_or_create_collection('vectorDB')

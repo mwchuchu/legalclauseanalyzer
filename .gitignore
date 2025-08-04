@@ -1,20 +1,61 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
+*$py.class
 
-# Virtual environments
-venv/
+# Environment
+.env
+.venv/
 env/
+venv/
+*.env
 
-# OS files
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# VS Code
+.vscode/
+
+# macOS
 .DS_Store
 
-# Logs and temp files
+# Logs and databases
 *.log
-*.tmp
+*.sqlite3
 
-# Embeddings
-RAGembeddings/
-/RAGembeddings/
-../RAGembeddings**
-app/api.env
+# FAISS index files
+*.faiss
+*.index
+*.pkl
+
+# Docker
+*.pid
+*.tar
+*.sock
+
+# Redis dump
+dump.rdb
+
+# Coverage reports
+htmlcov/
+.coverage
+.tox/
+.nox/
+.cache/
+coverage.xml
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# pyre
+.pyre/
+
+# pytest
+.pytest_cache/
+
+# Build artifacts
+build/
+dist/
+*.eg*

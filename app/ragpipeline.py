@@ -1,227 +1,484 @@
-#Libraries
 import pandas as pd
 import zipfile
 import os
-from typing import BinaryIO
-from tempfile import NamedTemporaryFile
-import google.generativeai as genai
 import json
 import re
-from db import vector_db
-import pandas as pd
 import uuid
+import logging
+from typing import BinaryIO, Dict, List, Optional, Union
+from tempfile import NamedTemporaryFile
+
+import google.generativeai as genai
 from fastapi.templating import Jinja2Templates
+from dotenv import load_dotenv
+
+# Local imports
+import vector_db
 from db_crud import get_follow_up_chats
 from db import db_dependency
 
+# Configuration
+load_dotenv()
+logger = logging.getLogger(__name__)
 
-#LLM API's & Embedding Model Configuration
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-genai.configure(api_key=GEMINI_API_KEY)
-genaimodel=genai.GenerativeModel(model_name='gemini-2.0-flash')
+# Configure Gemini AI
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+genaimodel = genai.GenerativeModel(model_name='gemini-2.0-flash')
 
 templates = Jinja2Templates(directory="templates")
 
-def embed_and_store_csv(file: BinaryIO, filename: str):
-    df = pd.read_csv(file)
+# Constants
+MAX_CONTEXT_LENGTH = 3000
+DEFAULT_TOP_K = 10
+
+
+def embed_and_store_csv(file: BinaryIO, filename: str) -> str:
+    """
+    Process CSV file and store embeddings in vector database.
     
-    if "clause_text" not in df.columns:
-        raise ValueError("Missing 'clause_text' column.")
-    
-    # Check if this file was already processed
-    existing = vector_db.get(
-        where={"source_file": filename},  # Metadata filter
-        limit=1
-    )
+    Args:
+        file: Binary file object
+        filename: Name of the file
+        
+    Returns:
+        Success message string
+    """
+    try:
+        # Read CSV with better error handling
+        df = pd.read_csv(file, encoding='utf-8')
+        
+        if "clause_text" not in df.columns:
+            raise ValueError("Missing required 'clause_text' column.")
+        
+        # Check for existing embeddings
+        try:
+            existing = vector_db.get(
+                where={"source_file": filename},
+                limit=1
+            )
+            
+            if existing and existing.get('ids'):
+                raise ValueError(f"Embeddings from '{filename}' already exist.")
+        except Exception as e:
+            # If it's not a "already exists" error, just log and continue
+            if "already exist" not in str(e):
+                logger.warning(f"Could not check existing embeddings: {e}")
+        
+        # Clean and prepare data
+        df = df.dropna(subset=["clause_text"])
+        df['clause_text'] = df['clause_text'].astype(str).str.strip()
+        df = df[df['clause_text'].str.len() > 0]
+        
+        if df.empty:
+            raise ValueError("No valid clause text found in CSV.")
+        
+        texts = df['clause_text'].tolist()
+        types = df.get('clause_type', ['Unknown'] * len(texts)).fillna('Unknown').tolist()
+        
+        # Generate metadata
+        metadatas = []
+        for idx, clause_type in enumerate(types):
+            metadatas.append({
+                "type": str(clause_type),
+                "clause_type": str(clause_type),
+                "source_file": filename,
+                "row_index": idx
+            })
+        
+        # Store in vector database
+        vector_db.add(
+            ids=[str(uuid.uuid4()) for _ in texts],
+            metadatas=metadatas,
+            documents=texts
+        )
+        
+        logger.info(f"Successfully processed {len(texts)} clauses from {filename}")
+        return f"✅ {len(texts)} clauses from '{filename}' added successfully."
+        
+    except Exception as e:
+        logger.error(f"Error processing CSV {filename}: {str(e)}")
+        raise ValueError(f"Failed to process CSV: {str(e)}")
 
-    if existing and existing['ids']:
-        raise ValueError(f" Embeddings from '{filename}' already exist.")
 
-    df = df.dropna(subset=["clause_text"])
-    texts = df['clause_text'].tolist()
-    types = df.get('clause_type', ['Unknown'] * len(texts)).tolist()
-
-    vector_db.add(
-        ids=[str(uuid.uuid4()) for _ in texts],
-        metadatas=[{"type": t, "source_file": filename} for t in types],
-        documents=texts
-    )
-
-    return f"✅ {len(texts)} clauses from '{filename}' added successfully."
-
-
-def handle_uploaded_file(file: BinaryIO, filename: str):
+def handle_uploaded_file(file: BinaryIO, filename: str) -> str:
     """Determine file type and process accordingly."""
     ext = os.path.splitext(filename)[1].lower()
-
-    if ext == ".csv":
-        embed_and_store_csv(file,filename)
-
-    elif ext == ".zip":
-        # Save the uploaded zip temporarily
-        with NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
-            tmp.write(file.read())
-            tmp.flush()
-
-            with zipfile.ZipFile(tmp.name, "r") as zip_ref:
-                csv_files = [f for f in zip_ref.namelist() if f.endswith(".csv")]
-
-                if not csv_files:
-                    raise ValueError("No CSV files found in the zip.")
-
-                for csv_file in csv_files:
-                    with zip_ref.open(csv_file) as f:
-                        embed_and_store_csv(f,os.path.basename(csv_file))
-
-            os.remove(tmp.name)  # Clean up
-
-    else:
+    
+    if ext not in [".csv", ".zip"]:
         raise ValueError("Only .csv and .zip files are allowed.")
+    
+    try:
+        if ext == ".csv":
+            return embed_and_store_csv(file, filename)
+            
+        elif ext == ".zip":
+            results = []
+            
+            # Save the uploaded zip temporarily
+            with NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
+                tmp.write(file.read())
+                tmp.flush()
+                
+                try:
+                    with zipfile.ZipFile(tmp.name, "r") as zip_ref:
+                        csv_files = [f for f in zip_ref.namelist() if f.endswith(".csv")]
+                        
+                        if not csv_files:
+                            raise ValueError("No CSV files found in the zip.")
+                        
+                        for csv_file in csv_files:
+                            try:
+                                with zip_ref.open(csv_file) as f:
+                                    result = embed_and_store_csv(f, os.path.basename(csv_file))
+                                    results.append(result)
+                            except Exception as e:
+                                error_msg = f"❌ Failed to process {csv_file}: {str(e)}"
+                                results.append(error_msg)
+                                logger.warning(error_msg)
+                    
+                    return "\n".join(results)
+                    
+                finally:
+                    os.remove(tmp.name)
+                    
+    except Exception as e:
+        logger.error(f"Error handling file {filename}: {str(e)}")
+        raise
 
-def analyze_query_intent_and_chunks(user_query):
-        prompt = f"""
+
+def analyze_query_intent_and_chunks(user_query: str) -> Dict:
+    """
+    Analyze user query to determine intent and extract chunks.
+    
+    Args:
+        user_query: User's input query
+        
+    Returns:
+        Dictionary with intent and chunks
+    """
+    prompt = f"""
     You are an intelligent NLP assistant. Given a user query, do the following:
 
-    1. Think step-by-step and determine the user's intent from these options:
-    - "compare": if the user is explicitly comparing two things (using words like compare, vs, difference between, better than, etc.)
-    - "define": if the user wants a definition or explanation of a single concept.
-    - "retrieve": if the user wants to know applications, uses, benefits, etc. of a topic.
+    1. Determine the user's intent from these options:
+       - "compare": if the user is explicitly comparing two things
+       - "define": if the user wants a definition or explanation
+       - "retrieve": if the user wants to know applications, uses, benefits, etc.
 
-    2. Based on the intent, extract:
-    - If intent is "compare" → return two separate concepts the user wants to compare
-    - If intent is "define" or "retrieve" → return one main concept only
+    2. Extract key concepts based on intent:
+       - If "compare" → return two separate concepts
+       - If "define" or "retrieve" → return one main concept
 
-    3. Return output ONLY in this JSON format (no extra explanation):
-
+    3. Return output ONLY in this JSON format:
     {{
-    "intent": "compare" | "define" | "retrieve",
-    "chunks": ["first", "second"] or ["single"]
+        "intent": "compare|define|retrieve",
+        "chunks": ["first", "second"] or ["single"],
+        "confidence": 0.8
     }}
 
-    User query:
-    "{user_query}"
+    User query: "{user_query}"
     """
 
-        try:
-            response = genaimodel.generate_content(prompt)
-            raw_text = response.text.strip()
-
-                    # Extract valid JSON only
-            try:
-                result = json.loads(raw_text)
-            except json.JSONDecodeError:
-                match = re.search(r'\{.*\}', raw_text, re.DOTALL)
-                if match:
-                    result = json.loads(match.group())
-                else:
-                    raise ValueError("No valid JSON found")
-
-            # 🔒 Final structure enforcement
-            if result["intent"] in ("define", "retrieve") and len(result["chunks"]) > 1:
-                joined_chunk = " ".join(result["chunks"])
-                result["chunks"] = [joined_chunk]
-
-            return result
-        except Exception as e:
-            print("Error:", e)
-            return {"intent": "unknown", "chunks": []}
-        
-        
-def search_top_k(result, k=5):
-    if not result or "chunks" not in result or not result["chunks"]:
-        return {"intent": "unknown", "results": []}
-
-    intent = result.get("intent", "unknown")
-    chunks = result["chunks"]
-
-    query_result = vector_db.query(
-        query_texts=chunks,
-        n_results=k
-    )
-
-    # Results will be a list if multiple chunks; single list if one chunk
-    all_results = []
-
-    for i, (metas, docs, dists) in enumerate(
-        zip(
-            query_result.get("metadatas", []),
-            query_result.get("documents", []),
-            query_result.get("distances", [])
-        )
-    ):
-        chunk_results = []
-        for meta, doc, dist in zip(metas, docs, dists):
-            chunk_results.append({
-                "score": float(dist),
-                "clause_text": doc,
-                "clause_type": meta.get("clause_type", "Unknown"),
-                "source_file": meta.get("source_file", ""),
-                "row_index": meta.get("row_index", -1)
-            })
-
-        # Use "results" label for single-chunk intents
-        if intent in ("define", "retrieve") or len(chunks) == 1:
-            return {
-                "intent": intent,
-                "chunks": chunks,
-                "results": chunk_results
+    try:
+        response = genaimodel.generate_content(
+            prompt,
+            generation_config={
+                "temperature": 0.1,
+                "max_output_tokens": 300
             }
+        )
+        
+        raw_text = response.text.strip()
+        
+        # Extract JSON
+        try:
+            result = json.loads(raw_text)
+        except json.JSONDecodeError:
+            match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+            if match:
+                result = json.loads(match.group())
+            else:
+                raise ValueError("No valid JSON found")
+        
+        # Validate result structure
+        if not isinstance(result, dict):
+            raise ValueError("Result is not a dictionary")
+            
+        intent = result.get("intent", "retrieve")
+        chunks = result.get("chunks", [user_query])
+        
+        # Ensure chunks is a list
+        if not isinstance(chunks, list):
+            chunks = [str(chunks)]
+            
+        # Clean empty chunks
+        chunks = [chunk.strip() for chunk in chunks if chunk and str(chunk).strip()]
+        if not chunks:
+            chunks = [user_query]
+        
+        # Enforce single chunk for define/retrieve
+        if intent in ("define", "retrieve") and len(chunks) > 1:
+            chunks = [" ".join(chunks)]
+        
+        return {
+            "intent": intent,
+            "chunks": chunks,
+            "confidence": result.get("confidence", 0.5)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error analyzing query intent: {str(e)}")
+        return {
+            "intent": "retrieve",
+            "chunks": [user_query],
+            "confidence": 0.0
+        }
 
-        # Else handle compare as list of labeled results
-        label = f"chunk_{i+1}"
-        all_results.append({label: chunk_results})
 
+def search_top_k(result: Dict, k: int = DEFAULT_TOP_K) -> Dict:
+    """
+    Search for similar documents from vector database.
+    
+    Args:
+        result: Dictionary containing intent and chunks
+        k: Number of top results to return per chunk
+        
+    Returns:
+        Dictionary with search results
+    """
+    # Input validation
+    if not result or not isinstance(result, dict):
+        logger.warning("Invalid result provided to search_top_k")
+        return {"intent": "unknown", "results": [], "error": "Invalid input"}
+    
+    chunks = result.get("chunks", [])
+    if not chunks:
+        logger.warning("No chunks provided for search")
+        return {"intent": result.get("intent", "unknown"), "results": [], "error": "No chunks"}
+    
+    intent = result.get("intent", "unknown")
+    logger.info(f"Searching for {len(chunks)} chunks with intent '{intent}'")
+    
+
+    
+    all_results = []
+    
+    for i, chunk in enumerate(chunks):
+        if not chunk or not str(chunk).strip():
+            logger.warning(f"Skipping empty chunk {i+1}")
+            continue
+            
+        try:
+            logger.info(f"Searching for chunk {i+1}: '{str(chunk)[:100]}...'")
+            
+            # Perform similarity search
+            search_result = vector_db.similarity_search(str(chunk), n_results=k)
+            
+            # Handle the search result safely
+            if not search_result or not isinstance(search_result, dict):
+                logger.warning(f"Invalid search result for chunk {i+1}")
+                continue
+            
+            # Extract results with safe indexing
+            documents = search_result.get("documents", [])
+            metadatas = search_result.get("metadatas", [])
+            distances = search_result.get("distances", [])
+            
+            # Handle nested list structure (ChromaDB returns nested lists)
+            if documents and isinstance(documents[0], list):
+                documents = documents[0] if documents else []
+            if metadatas and isinstance(metadatas[0], list):
+                metadatas = metadatas[0] if metadatas else []
+            if distances and isinstance(distances[0], list):
+                distances = distances[0] if distances else []
+            
+            if not documents:
+                logger.warning(f"No documents found for chunk {i+1}")
+                continue
+            
+            # Process results
+            chunk_results = []
+            for j, doc in enumerate(documents):
+                try:
+                    if not doc or not str(doc).strip():
+                        continue
+                    
+                    # Safe metadata extraction
+                    meta = metadatas[j] if j < len(metadatas) else {}
+                    score = distances[j] if j < len(distances) else 1.0
+                    
+                    # Ensure meta is a dictionary
+                    if not isinstance(meta, dict):
+                        meta = {}
+                    
+                    # Extract metadata safely
+                    clause_type = meta.get("clause_type") or meta.get("type", "Unknown")
+                    source_file = meta.get("source_file", "")
+                    row_index = meta.get("row_index", -1)
+                    
+                    result_item = {
+                        "score": float(score) if score is not None else 1.0,
+                        "clause_text": str(doc).strip(),
+                        "clause_type": str(clause_type),
+                        "source_file": str(source_file),
+                        "row_index": int(row_index) if isinstance(row_index, (int, float)) else -1,
+                        "chunk_index": i + 1
+                    }
+                    
+                    chunk_results.append(result_item)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing result {j} for chunk {i+1}: {e}")
+                    continue
+            
+            logger.info(f"Found {len(chunk_results)} results for chunk {i+1}")
+            
+            # For single chunk or define/retrieve intents, return directly
+            if intent in ("define", "retrieve") or len(chunks) == 1:
+                return {
+                    "intent": intent,
+                    "chunks": chunks,
+                    "results": chunk_results,
+                    "total_results": len(chunk_results)
+                }
+            
+            # For multi-chunk results (compare), organize by chunk
+            if chunk_results:
+                chunk_label = f"chunk_{i+1}"
+                all_results.append({chunk_label: chunk_results})
+            
+        except Exception as e:
+            logger.error(f"Error searching for chunk {i+1}: {e}")
+            continue
+    
+    total_results = sum(len(list(chunk_data.values())[0]) for chunk_data in all_results)
+    logger.info(f"Search completed: {total_results} total results across {len(all_results)} chunks")
+    
     return {
         "intent": intent,
         "chunks": chunks,
-        "results": all_results
+        "results": all_results if all_results else [],
+        "total_results": total_results
     }
 
 
+def get_context_from_search_results(search_results: Dict, max_context_length: int = MAX_CONTEXT_LENGTH) -> str:
+    """
+    Extract context string from search results for RAG.
+    
+    Args:
+        search_results: Results from search_top_k function
+        max_context_length: Maximum length of context string
+        
+    Returns:
+        String containing relevant context
+    """
+    if not search_results or not search_results.get('results'):
+        logger.warning("No search results provided for context extraction")
+        return ""
+    
+    context_parts = []
+    results = search_results['results']
+    
+    try:
+        # Handle single chunk results (list of dicts)
+        if isinstance(results, list) and results:
+            # Check if it's a direct list of results or multi-chunk structure
+            first_result = results[0]
+            
+            if isinstance(first_result, dict) and 'clause_text' in first_result:
+                # Direct list of results
+                for result in results[:5]:  # Top 5 results
+                    if result.get('clause_text'):
+                        context_parts.append(result['clause_text'])
+            else:
+                # Multi-chunk results
+                for chunk_data in results:
+                    if isinstance(chunk_data, dict):
+                        for chunk_name, chunk_results in chunk_data.items():
+                            if isinstance(chunk_results, list):
+                                for result in chunk_results[:3]:  # Top 3 per chunk
+                                    if isinstance(result, dict) and result.get('clause_text'):
+                                        context_parts.append(result['clause_text'])
+    
+    except Exception as e:
+        logger.error(f"Error extracting context: {e}")
+        return ""
+    
+    # Join and truncate context
+    full_context = "\n\n".join(context_parts)
+    
+    if len(full_context) > max_context_length:
+        full_context = full_context[:max_context_length] + "..."
+    
+    logger.info(f"Generated context with {len(context_parts)} clauses, {len(full_context)} characters")
+    return full_context
 
-def format_rag_context(retrieval: dict) -> str:
+
+def format_rag_context(retrieval: Dict) -> str:
+    """
+    Format search results into readable context for RAG.
+    
+    Args:
+        retrieval: Search results dictionary
+        
+    Returns:
+        Formatted context string
+    """
+    if not retrieval or not retrieval.get("results"):
+        return "No relevant clauses found."
+    
     intent = retrieval.get("intent", "unknown")
     results = retrieval.get("results", [])
     context = ""
+    
+    try:
+        # Handle single chunk results (define/retrieve)
+        if isinstance(results, list) and results:
+            first_result = results[0]
+            
+            if isinstance(first_result, dict) and "clause_text" in first_result:
+                context += "### Retrieved Legal Clauses:\n"
+                for i, result in enumerate(results[:10], 1):  # Limit to 10 results
+                    if result.get('clause_text'):
+                        context += f"{i}. {result['clause_text'].strip()}"
+                        if result.get("clause_type"):
+                            context += f" (Type: {result['clause_type']})"
+                        if result.get("source_file"):
+                            context += f" — from {result['source_file']}"
+                        context += "\n"
+                return context.strip()
+        
+        # Handle multi-chunk results (compare)
+        for entry in results:
+            if isinstance(entry, dict):
+                for label, matches in entry.items():
+                    context += f"\n### Results for {label.replace('_', ' ').title()}:\n"
+                    if isinstance(matches, list):
+                        for i, match in enumerate(matches[:5], 1):  # Top 5 per chunk
+                            if isinstance(match, dict) and match.get('clause_text'):
+                                context += f"{i}. {match['clause_text'].strip()}"
+                                if match.get("clause_type"):
+                                    context += f" (Type: {match['clause_type']})"
+                                if match.get("source_file"):
+                                    context += f" — from {match['source_file']}"
+                                context += "\n"
+    
+    except Exception as e:
+        logger.error(f"Error formatting context: {e}")
+        return "Error formatting search results."
+    
+    return context.strip() if context.strip() else "No relevant clauses found."
 
-    if not results:
-        return "No relevant clauses found."
-
-    # Handle "define" or "retrieve" (single chunk result)
-    if intent in ("define", "retrieve") and isinstance(results, list) and isinstance(results[0], dict) and "clause_text" in results[0]:
-        context += "### Retrieved Legal Clauses:\n"
-        for i, m in enumerate(results, 1):
-            context += f"{i}. {m['clause_text'].strip()}"
-            if m.get("clause_type"):
-                context += f" (Type: {m['clause_type']})"
-            if m.get("source_file"):
-                context += f" — from {m['source_file']}"
-            context += "\n"
-        return context.strip()
-
-    # Handle "compare" (multiple chunks)
-    for entry in results:
-        for label, matches in entry.items():
-            context += f"\n### Results for {label.replace('_', ' ').title()}:\n"
-            for i, m in enumerate(matches, 1):
-                context += f"{i}. {m['clause_text'].strip()}"
-                if m.get("clause_type"):
-                    context += f" (Type: {m['clause_type']})"
-                if m.get("source_file"):
-                    context += f" — from {m['source_file']}"
-                context += "\n"
-
-    return context.strip()
 
 def answer_with_gemini_rag(
     user_query: str, 
     context: str,
-    follow_up_chats: str = None,
-    session_id: int = None,
-    db: db_dependency = None
+    follow_up_chats: Optional[str] = None,
+    session_id: Optional[int] = None,
+    db: Optional[db_dependency] = None
 ) -> str:
     """
-    Generates a legal answer using Gemini with RAG (Retrieval-Augmented Generation).
+    Generate a legal answer using Gemini with RAG.
     
     Args:
         user_query: The user's legal question
@@ -231,71 +488,71 @@ def answer_with_gemini_rag(
         db: Database dependency (optional)
         
     Returns:
-        Markdown-formatted legal answer with citations
+        Legal answer with citations
     """
-    # Enhanced follow-up chat retrieval if session_id provided
+    # Get follow-up chats if session_id provided
     if session_id and db and not follow_up_chats:
-        follow_up_chats = get_follow_up_chats(db, session_id)
+        try:
+            follow_up_chats = get_follow_up_chats(db, session_id)
+            if follow_up_chats == "No follow-up chats found for this session.":
+                follow_up_chats = None
+        except Exception as e:
+            logger.warning(f"Could not retrieve follow-up chats: {e}")
+            follow_up_chats = None
     
-    # Structured prompt engineering
-      # Structured prompt engineering
+    # Build prompt
     prompt = f"""
     LEGAL ANALYSIS REQUEST
     ----------------------
-
-    ROLE:
-    You are a senior legal AI assistant trained in contract law, multilingual greetings, and user-friendly communication. Begin interactions professionally and politely. If the user's message is a greeting or salutation (e.g., "Hi", "Hello", or greetings in Urdu or other languages), greet them back in the same language if possible, introduce yourself, and ask how you may assist them legally.
-
-    CONTEXT (Relevant Clauses):
-    {context}
+    You are a senior legal AI assistant specializing in contract law interpretation.
+    
+    RELEVANT LEGAL CONTEXT:
+    {context if context else "No specific legal context provided."}
     
     CURRENT QUERY:
     {user_query}
     
-    CHAT HISTORY:
-    {follow_up_chats if follow_up_chats else "No previous chat history available"}
+    PREVIOUS CHAT HISTORY:
+    {follow_up_chats if follow_up_chats else "No previous chat history available."}
     
     INSTRUCTIONS:
-    1. If the user’s input is a greeting or introduction, respond politely and introduce yourself.
-    2. Otherwise, analyze the query STRICTLY within the provided legalclauses context.
-    3. Maintain continuity with any previous chats.
-    4. Structure your response as:
-       - A direct answer to the user’s query
-       - Potential implications (if applicable)
-    5. Use clean and clear Markdown formatting.
-    6. If legal context is insufficient to answer the query, reply: "Based on the provided clauses: [Partial answer]"
-    7. Do NOT provide generalized or irrelevant legal information.
-
+    1. Analyze the query using ONLY the provided legal context
+    2. Maintain continuity with previous chats if available
+    3. Structure your response clearly with:
+       - Direct answer to the query
+       - Key legal implications (if relevant)
+       - Practical considerations (if applicable)
+    4. If context is insufficient, state: "Based on the provided clauses: [answer with available information]"
+    5. Be specific and avoid generic legal advice
+    6. Use clear, professional language
+    
     RESPONSE:
     """
-
     
     try:
-        # Generate with safety settings
         response = genaimodel.generate_content(
             prompt,
             generation_config={
-                "temperature": 0.3,  # More deterministic
+                "temperature": 0.2,
                 "max_output_tokens": 1500
-            },
-            safety_settings={
-                "HARM_CATEGORY_DANGEROUS": "BLOCK_NONE",
-                "HARM_CATEGORY_HARASSMENT": "BLOCK_MEDIUM_AND_ABOVE"
             }
         )
         
-        # Post-processing
-        return response.text
+        return response.text.strip()
+        
     except Exception as e:
-        return f"## Legal Analysis Unavailable\nError: {str(e)}"
+        logger.error(f"Error generating response: {e}")
+        return f"Legal analysis unavailable due to technical error: {str(e)}"
+
+
 
 def get_formatted_bot_response(
     user_message: str,
     db: db_dependency,
-    session_id: int = None
-) -> dict:
+    session_id: Optional[int] = None
+) -> Dict:
     """
-    Generates a formatted legal response with context-aware RAG.
+    Generate a comprehensive formatted legal response.
     
     Args:
         user_message: User's legal query
@@ -303,64 +560,81 @@ def get_formatted_bot_response(
         session_id: Optional chat session ID
         
     Returns:
-        {
-            "response": HTML-formatted answer,
-            "intent": detected intent,
-            "status": "success"|"error",
-            "context_used": bool  # Whether context was utilized
-        }
+        Dictionary with response, intent, status, and context usage info
     """
     try:
-        # ===== 1. Query Analysis =====
+        # Step 1: Analyze query intent
         analysis_result = analyze_query_intent_and_chunks(user_message)
         if not analysis_result or "intent" not in analysis_result:
             raise ValueError("Failed to analyze query intent")
         
-        # ===== 2. Context Retrieval =====
-        search_results = search_top_k(analysis_result, k=10)
-        if not search_results:
+        logger.info(f"Query analysis: {analysis_result}")
+        
+        # Step 2: Search for relevant context
+        search_results = search_top_k(analysis_result, k=DEFAULT_TOP_K)
+        if not search_results or search_results.get("error"):
+            error_msg = search_results.get("error", "No search results") if search_results else "Search failed"
             return {
-                "response": "<p>No relevant legal clauses found.</p>",
+                "response": f"Unable to find relevant legal clauses: {error_msg}",
                 "intent": analysis_result["intent"],
-                "status": "success",
+                "status": "error",
                 "context_used": False
             }
         
-        # ===== 3. Context Formatting =====
-        rag_context = format_rag_context(search_results)
+        # Step 3: Format context
+        rag_context = get_context_from_search_results(search_results)
         
-        # ===== 4. Follow-up Chats =====
+        # Step 4: Get follow-up chats
         follow_up_chats = None
         if session_id:
-            follow_up_chats = get_follow_up_chats(db, session_id)
-            if follow_up_chats == "No follow-up chats found for this session.":
-                follow_up_chats = None  # Treat as no history
+            try:
+                follow_up_chats = get_follow_up_chats(db, session_id)
+                if follow_up_chats == "No follow-up chats found for this session.":
+                    follow_up_chats = None
+            except Exception as e:
+                logger.warning(f"Could not retrieve chat history: {e}")
         
-        # ===== 5. Generate Response =====
-        response = answer_with_gemini_rag(
+        # Step 5: Generate response
+        raw_response = answer_with_gemini_rag(
             user_query=user_message,
             context=rag_context,
-            follow_up_chats=follow_up_chats
+            follow_up_chats=follow_up_chats,
+            session_id=session_id,
+            db=db
         )
         
-        # ===== 6. Formatting & Return =====
         return {
-            "response": response,
+            "response": raw_response,
             "intent": analysis_result["intent"],
             "status": "success",
-            "context_used": bool(rag_context.strip())
+            "context_used": bool(rag_context and rag_context.strip())
         }
         
     except Exception as e:
-        error_msg = f"<p class='error'>Legal analysis unavailable: {str(e)}</p>"
+        logger.error(f"Error in get_formatted_bot_response: {e}")
         return {
-            "response": error_msg,
+            "response": f"Legal analysis unavailable: {str(e)}",
             "intent": "error",
             "status": "error",
             "context_used": False
         }
 
+
 def summarize_user_message(message: str) -> str:
+    """
+    Create a short summary of user message for logging/display.
+    
+    Args:
+        message: Full user message
+        
+    Returns:
+        Shortened summary
+    """
+    if not message:
+        return "Empty message"
+    
     words = message.split()
-    short_summary = " ".join(words[:5]) + "..." if len(words) > 5 else message
-    return short_summary
+    if len(words) <= 5:
+        return message
+    
+    return " ".join(words[:5]) + "..."

@@ -20,7 +20,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - VECTOR_DB_PATH=/app/RAGembeddings
     env_file:
-      - ./app/api.env
+      - ./app/.env
 
   celery_worker:
     build:
@@ -39,7 +39,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - VECTOR_DB_PATH=/app/RAGembeddings
     env_file:
-      - ./app/api.env
+      - ./app/.env
 
   db:
     image: postgres:latest

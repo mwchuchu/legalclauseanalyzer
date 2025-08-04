@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Byte-compiled / Python cache
 __pycache__/
 *.py[cod]
@@ -49,3 +50,56 @@ uploads/
 *.bak
 temp/
 tmp/
+=======
+# Byte-compiled / Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.env/
+.venv/
+ragchatbotenv/
+*/venv/
+*/.env
+*/.venv/
+*/ragchatbotenv/
+
+# Secret and environment files
+api.env
+.env
+*.env
+
+# Editor / OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+/RAGembeddings/
+
+# Logs
+*.log
+
+# Ignore uploaded or generated data
+uploads/
+*.zip
+*.csv
+*.xlsx
+*.json
+*.md
+
+# Temporary files
+*.tmp
+*.bak
+temp/
+tmp/
+>>>>>>> be1b860 (Shifted to Faiss DB)
